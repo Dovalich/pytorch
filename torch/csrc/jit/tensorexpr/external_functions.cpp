@@ -12,6 +12,7 @@
 #include <ATen/native/xnnpack/OpContext.h>
 #include <ATen/quantized/QTensorImpl.h>
 #include <aten/src/ATen/Parallel.h>
+#include <c10/core/TensorImpl.h>
 #include <c10/core/TensorOptions.h>
 #include <c10/util/ArrayRef.h>
 #include <c10/util/irange.h>
@@ -378,6 +379,40 @@ void nnc_aten_quantized_conv2d(
   memcpy(buf_data[0], r.data_ptr(), r.element_size() * r.numel());
 }
 
+void nnc_aten_quantized_conv2d_out(
+    int64_t bufs_num,
+    void** buf_data,
+    int64_t* buf_ranks,
+    int64_t* buf_dims,
+    int64_t* buf_strides,
+    int8_t* buf_dtypes,
+    int64_t,
+    int64_t* extra_args) {
+  const double x_qscale = ((double*)extra_args)[0];
+  const int64_t x_qzero = extra_args[1];
+  const c10::ScalarType x_qdtype = static_cast<c10::ScalarType>(extra_args[2]);
+  // TODO: optimize constructTensors to skip creating tensor for out tensors
+  auto tensors = constructTensors(
+      bufs_num,
+      buf_data,
+      buf_ranks,
+      buf_dims,
+      buf_strides,
+      buf_dtypes,
+      {{1u, {x_qscale, x_qzero, toQIntType(x_qdtype)}}});
+  auto convPackedParams =
+      reinterpret_cast<ConvPackedParamsBase<2>*>(buf_data[2]);
+  const double out_qscale = ((double*)extra_args)[3];
+  const int64_t out_qzero = extra_args[4];
+  // NOLINTNEXTLINE
+  auto r = convPackedParams->apply(tensors[1], out_qscale, out_qzero);
+  buf_data[0] = r.data_ptr();
+  c10::raw::intrusive_ptr::incref(r.getIntrusivePtr().get());
+  void* ptr_to_free =
+      r.unsafeGetTensorImpl()->storage().data_ptr().get_context();
+  buf_data[bufs_num] = ptr_to_free;
+}
+
 void nnc_aten_quantized_conv2d_relu(
     int64_t bufs_num,
     void** buf_data,
@@ -405,6 +440,43 @@ void nnc_aten_quantized_conv2d_relu(
   // NOLINTNEXTLINE
   auto r = convPackedParams->apply_relu(tensors[1], out_qscale, out_qzero);
   memcpy(buf_data[0], r.data_ptr(), r.element_size() * r.numel());
+}
+
+void nnc_aten_quantized_conv2d_relu_out(
+    int64_t bufs_num,
+    void** buf_data,
+    int64_t* buf_ranks,
+    int64_t* buf_dims,
+    int64_t* buf_strides,
+    int8_t* buf_dtypes,
+    int64_t,
+    int64_t* extra_args) {
+  const double x_qscale = ((double*)extra_args)[0];
+  const int64_t x_qzero = extra_args[1];
+  const c10::ScalarType x_qdtype = static_cast<c10::ScalarType>(extra_args[2]);
+  auto tensors = constructTensors(
+      bufs_num,
+      buf_data,
+      buf_ranks,
+      buf_dims,
+      buf_strides,
+      buf_dtypes,
+      {{1u, {x_qscale, x_qzero, toQIntType(x_qdtype)}}});
+  auto convPackedParams =
+      reinterpret_cast<ConvPackedParamsBase<2>*>(buf_data[2]);
+  const double out_qscale = ((double*)extra_args)[3];
+  const int64_t out_qzero = extra_args[4];
+  // NOLINTNEXTLINE
+  auto r = convPackedParams->apply_relu(tensors[1], out_qscale, out_qzero);
+  buf_data[0] = r.data_ptr();
+  c10::raw::intrusive_ptr::incref(r.getIntrusivePtr().get());
+}
+
+void nnc_aten_free(int64_t bufs_num, void** ptrs) noexcept {
+  for (const auto i : c10::irange(bufs_num)) {
+    void* ptr = ptrs[i];
+    c10::raw::intrusive_ptr::decref((c10::TensorImpl*)ptr);
+  }
 }
 
 void nnc_aten_quantized_linear(
@@ -529,6 +601,38 @@ void nnc_aten_quantized_mul(
   // NOLINTNEXTLINE
   auto r = quantized_mul(tensors[1], tensors[2], out_qscale, out_qzero);
   memcpy(buf_data[0], r.data_ptr(), r.element_size() * r.numel());
+}
+
+void nnc_aten_quantized_mul_out(
+    int64_t bufs_num,
+    void** buf_data,
+    int64_t* buf_ranks,
+    int64_t* buf_dims,
+    int64_t* buf_strides,
+    int8_t* buf_dtypes,
+    int64_t,
+    int64_t* extra_args) {
+  const double a_qscale = ((double*)extra_args)[0];
+  const int64_t a_qzero = extra_args[1];
+  const c10::ScalarType a_qdtype = static_cast<c10::ScalarType>(extra_args[2]);
+  const double b_qscale = ((double*)extra_args)[3];
+  const int64_t b_qzero = extra_args[4];
+  const c10::ScalarType b_qdtype = static_cast<c10::ScalarType>(extra_args[5]);
+  auto tensors = constructTensors(
+      bufs_num,
+      buf_data,
+      buf_ranks,
+      buf_dims,
+      buf_strides,
+      buf_dtypes,
+      {{1u, {a_qscale, a_qzero, toQIntType(a_qdtype)}},
+       {2u, {b_qscale, b_qzero, toQIntType(b_qdtype)}}});
+  const double out_qscale = ((double*)extra_args)[6];
+  const int64_t out_qzero = extra_args[7];
+  // NOLINTNEXTLINE
+  auto r = quantized_mul(tensors[1], tensors[2], out_qscale, out_qzero);
+  buf_data[0] = r.data_ptr();
+  c10::raw::intrusive_ptr::incref(r.getIntrusivePtr().get());
 }
 
 void nnc_aten_quantized_mul_scalar(
@@ -975,9 +1079,15 @@ const static RegisterNNCExternalFunction nnc_quantized_conv1d(
 const static RegisterNNCExternalFunction nnc_quantized_conv2d(
     "nnc_aten_quantized_conv2d",
     nnc_aten_quantized_conv2d);
+const static RegisterNNCExternalFunction nnc_quantized_conv2d_out(
+    "nnc_aten_quantized_conv2d_out",
+    nnc_aten_quantized_conv2d_out);
 const static RegisterNNCExternalFunction nnc_quantized_conv2d_relu(
     "nnc_aten_quantized_conv2d_relu",
     nnc_aten_quantized_conv2d_relu);
+const static RegisterNNCExternalFunction nnc_quantized_conv2d_relu_out(
+    "nnc_aten_quantized_conv2d_relu_out",
+    nnc_aten_quantized_conv2d_relu_out);
 const static RegisterNNCExternalFunction nnc_quantized_linear(
     "nnc_aten_quantized_linear",
     nnc_aten_quantized_linear);
@@ -988,6 +1098,9 @@ const static RegisterNNCExternalFunction nnc_quantized_add(
 const static RegisterNNCExternalFunction nnc_quantized_mul(
     "nnc_aten_quantized_mul",
     nnc_aten_quantized_mul);
+const static RegisterNNCExternalFunction nnc_quantized_mul_out(
+    "nnc_aten_quantized_mul_out",
+    nnc_aten_quantized_mul_out);
 const static RegisterNNCExternalFunction nnc_quantized_mul_scalar(
     "nnc_aten_quantized_mul_scalar",
     nnc_aten_quantized_mul_scalar);
